@@ -42,12 +42,6 @@ jobs:
         run: |
           docker exec -e CI=true magento-project-community-edition bash -c "cat /data/extensions/migrate-m2-to-mageos/migrate-to-mage-os.sh | bash"
 
-      - name: Finish migration
-        run: |
-          docker exec -e CI=true magento-project-community-edition rm -rf var/cache/
-          docker exec -e CI=true magento-project-community-edition php bin/magento
-          docker exec -e CI=true magento-project-community-edition php bin/magento setup:upgrade
-
       - name: Validate that we can reach the frontend
         run: curl --fail-with-body http://localhost/
 

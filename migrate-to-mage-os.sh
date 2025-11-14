@@ -127,6 +127,82 @@ package_exists() {
     fi
 }
 
+# Helper function to extract values from env.php
+get_env_config() {
+    local key_path=$1
+
+    $PHP_CMD -r "
+        \$config = require 'app/etc/env.php';
+        \$keys = explode('.', '${key_path}');
+        \$value = \$config;
+        foreach (\$keys as \$key) {
+            if (isset(\$value[\$key])) {
+                \$value = \$value[\$key];
+            } else {
+                \$value = ''; break;
+            }
+        }
+        echo is_array(\$value) ? json_encode(\$value) : \$value;
+    " 2>/dev/null
+}
+
+# Helper function to flush Redis database using PHP
+flush_redis_db() {
+    local server=$1
+    local port=$2
+    local password=$3
+    local db=$4
+    local db_name=$5
+
+    # Return if no server configured
+    if [ -z "${server}" ]; then
+        return 0
+    fi
+
+    echo "Flushing Redis ${db_name} (${server}:${port:-socket}, db: ${db})..."
+
+    # Use PHP to flush Redis
+    $PHP_CMD -r "
+        if (!extension_loaded('redis')) {
+            echo 'Redis extension not available, skipping flush\n';
+            exit(0);
+        }
+
+        \$redis = new Redis();
+        try {
+            // Connect to Redis (socket or TCP)
+            if ('${port}' === '' || '${port}' === '0') {
+                \$connected = \$redis->connect('${server}');
+            } else {
+                \$connected = \$redis->connect('${server}', ${port});
+            }
+
+            if (!\$connected) {
+                echo 'Failed to connect to Redis\n';
+                exit(1);
+            }
+
+            // Authenticate if password is provided
+            if ('${password}' !== '') {
+                \$redis->auth('${password}');
+            }
+
+            // Select database
+            if ('${db}' !== '') {
+                \$redis->select(${db});
+            }
+
+            // Flush the database
+            \$redis->flushDB();
+            echo 'Successfully flushed Redis ${db_name}' . PHP_EOL;
+            \$redis->close();
+        } catch (Exception \$e) {
+            echo 'Error flushing Redis: ' . \$e->getMessage() . PHP_EOL;
+            exit(1);
+        }
+    " 2>&1
+}
+
 # Add the Mage-OS repository, so Composer know where to download the packages from
 $COMPOSER_CMD config repositories.mage-os composer https://repo.mage-os.org/ --no-interaction
 
@@ -203,16 +279,10 @@ while [ "$UPDATE_SUCCESS" = false ]; do
         echo -e "${YELLOW}https://mage-os.org/discord-channel/${NC}"
         echo ""
 
-        if [[ -z "${CI:-}" ]]; then
-            read -p "Would you like to retry the composer update? (yes/no): " -r
-            echo ""
-            if [[ ! $REPLY =~ ^[Yy][Ee][Ss]$ ]]; then
-                echo -e "${RED}Migration cancelled.${NC}"
-                exit 1
-            fi
-        else
-            # In CI mode, don't retry automatically
-            echo -e "${RED}Running in CI mode, exiting...${NC}"
+        read -p "Would you like to retry the composer update? (yes/no): " -r
+        echo ""
+        if [[ ! $REPLY =~ ^[Yy][Ee][Ss]$ ]]; then
+            echo -e "${RED}Migration cancelled.${NC}"
             exit 1
         fi
     fi
@@ -230,8 +300,77 @@ echo ""
 echo -e "${GREEN}Mage-OS installation verified successfully${NC}"
 echo ""
 
+# Clean up caches and generated files
+echo "Cleaning up caches and generated files..."
+
+# Extract Redis cache configuration
+redisCacheServer=$(get_env_config "cache.frontend.default.backend_options.server")
+redisCachePort=$(get_env_config "cache.frontend.default.backend_options.port")
+redisCachePassword=$(get_env_config "cache.frontend.default.backend_options.password")
+redisCacheDB=$(get_env_config "cache.frontend.default.backend_options.database")
+
+# Extract Redis page cache configuration
+redisPageCacheServer=$(get_env_config "cache.frontend.page_cache.backend_options.server")
+redisPageCachePort=$(get_env_config "cache.frontend.page_cache.backend_options.port")
+redisPageCachePassword=$(get_env_config "cache.frontend.page_cache.backend_options.password")
+redisPageCacheDB=$(get_env_config "cache.frontend.page_cache.backend_options.database")
+
+# Extract Redis session configuration
+redisSessionServer=$(get_env_config "session.redis.host")
+redisSessionPort=$(get_env_config "session.redis.port")
+redisSessionPassword=$(get_env_config "session.redis.password")
+redisSessionDB=$(get_env_config "session.redis.database")
+
+# Flush Redis caches if configured
+REDIS_FLUSHED=false
+if [ -n "${redisCacheServer}" ]; then
+    flush_redis_db "${redisCacheServer}" "${redisCachePort}" "${redisCachePassword}" "${redisCacheDB}" "cache"
+    REDIS_FLUSHED=true
+fi
+
+if [ -n "${redisPageCacheServer}" ] && [ "${redisPageCacheServer}" != "${redisCacheServer}" ]; then
+    flush_redis_db "${redisPageCacheServer}" "${redisPageCachePort}" "${redisPageCachePassword}" "${redisPageCacheDB}" "page_cache"
+    REDIS_FLUSHED=true
+fi
+
+if [ -n "${redisSessionServer}" ]; then
+    flush_redis_db "${redisSessionServer}" "${redisSessionPort}" "${redisSessionPassword}" "${redisSessionDB}" "session"
+    REDIS_FLUSHED=true
+fi
+
+# Remove file-based cache if Redis wasn't flushed
+if [ "$REDIS_FLUSHED" = false ]; then
+    echo "No Redis configuration found"
+fi
+
 # Remove generated static files
-rm -rf pub/static/adminhtml and pub/static/frontend generated/*
+echo "Removing generated static and cache files..."
+rm -rf pub/static/adminhtml pub/static/frontend generated/* var/cache/*
+
+echo -e "${GREEN}Cache and generated files cleaned successfully${NC}"
+echo ""
+
+# Run setup:upgrade
+echo "Running setup:upgrade to complete the migration..."
+echo ""
+if $PHP_CMD bin/magento setup:upgrade; then
+    echo ""
+    echo -e "${GREEN}Setup:upgrade completed successfully${NC}"
+else
+    echo ""
+    echo -e "${RED}=========================================${NC}"
+    echo -e "${RED}Setup upgrade failed${NC}"
+    echo -e "${RED}=========================================${NC}"
+    echo ""
+    echo -e "${YELLOW}The migration process completed, but setup:upgrade failed.${NC}"
+    echo -e "${YELLOW}Please review the errors above and run the following command manually:${NC}"
+    echo -e "${YELLOW}  bin/magento setup:upgrade${NC}"
+    echo ""
+    echo -e "${YELLOW}If you need help, ask at the Mage-OS Discord channel:${NC}"
+    echo -e "${YELLOW}https://mage-os.org/discord-channel/${NC}"
+    echo ""
+    exit 1
+fi
 
 echo ""
 echo -e "${GREEN}=========================================${NC}"
@@ -243,9 +382,4 @@ echo ""
 echo "We are always looking for members, maintainers and sponsors."
 echo "For more information about that, please visit:"
 echo "https://mage-os.org/about/mage-os-membership/"
-echo ""
-echo -e "${YELLOW}IMPORTANT: Next steps to complete the migration:${NC}"
-echo -e "${YELLOW}1. Flush your cache directly, not through Magento.${NC}"
-echo -e "${YELLOW}   - Flush Redis or remove the contents of the 'var/cache' folder${NC}"
-echo -e "${YELLOW}2. Run: bin/magento setup:upgrade${NC}"
 echo ""

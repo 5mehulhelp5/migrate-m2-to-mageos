@@ -37,16 +37,7 @@ chmod +x migrate-to-mage-os.sh
 
 ## After Migration
 
-After the script completes successfully, you need to:
-
-1. **Flush your cache directly** (not through Magento):
-   - Flush Redis, or
-   - Remove the contents of the `var/cache` folder
-
-2. **Run setup:upgrade**:
-```bash
-bin/magento setup:upgrade
-```
+Make sure to check your installation thoroughly before deploying to production.
 
 ## Important Notes
 
