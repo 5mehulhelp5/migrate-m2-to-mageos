@@ -72,35 +72,6 @@ fi
 
 echo "Using composer: $COMPOSER_CMD"
 
-# Check if migration has already been run
-echo "Checking if migration has already been run"
-
-if $COMPOSER_CMD show magento/product-community-edition --no-interaction &> /dev/null; then
-    HAS_MAGENTO=true
-else
-    HAS_MAGENTO=false
-fi
-
-if $COMPOSER_CMD show mage-os/product-community-edition --no-interaction &> /dev/null; then
-    HAS_MAGEOS=true
-else
-    HAS_MAGEOS=false
-fi
-
-if [[ "$HAS_MAGENTO" == "false" && "$HAS_MAGEOS" == "true" ]]; then
-    echo -e "${YELLOW}=========================================${NC}"
-    echo -e "${YELLOW}Migration already completed${NC}"
-    echo -e "${YELLOW}=========================================${NC}"
-    echo ""
-    echo -e "${GREEN}This store has already been migrated to Mage-OS.${NC}"
-    echo "No further action is needed."
-    exit 0
-elif [[ "$HAS_MAGENTO" == "false" && "$HAS_MAGEOS" == "false" ]]; then
-    echo -e "${RED}Error: Neither magento/product-community-edition nor mage-os/product-community-edition found.${NC}"
-    echo -e "${RED}This does not appear to be a valid Magento Community Edition installation.${NC}"
-    exit 1
-fi
-
 echo -e "${GREEN}Ready to migrate from Magento to Mage-OS${NC}"
 
 # Get the Magento version
@@ -132,20 +103,120 @@ echo -e "${GREEN}Developer mode confirmed${NC}"
 echo ""
 echo ""
 
+#########################################################################################################
+# Below this block are the following commands executed. They are idempotent, so it may be hard to read. #
+#########################################################################################################
+#
+# composer config repositories.mage-os composer https://repo.mage-os.org/ --no-interaction
+# composer config repositories.mage-os composer https://repo.mage-os.org/ --no-interaction
+# composer require allure-framework/allure-phpunit:* magento/magento2-functional-testing-framework:* phpstan/phpstan:* phpunit/phpunit:* sebastian/phpcpd:* --dev --no-update --no-interaction
+# composer remove magento/product-community-edition magento/composer-dependency-version-audit-plugin magento/composer-root-update-plugin --no-update --no-interaction
+# composer update --no-plugins --with-all-dependencies --no-interaction
+#
+#########################################################################################################
+
+# Helper function to check if a package exists in composer.json
+package_exists() {
+    local package=$1
+    local dev_flag=${2:-""}
+
+    if [[ "$dev_flag" == "--dev" ]]; then
+        grep -q "\"$package\"" composer.json && grep -A 999 "\"require-dev\"" composer.json | grep -m 1 -B 999 "}" | grep -q "\"$package\""
+    else
+        grep -q "\"$package\"" composer.json && grep -A 999 "\"require\"" composer.json | grep -m 1 -B 999 "}" | grep -q "\"$package\""
+    fi
+}
+
 # Add the Mage-OS repository, so Composer know where to download the packages from
 $COMPOSER_CMD config repositories.mage-os composer https://repo.mage-os.org/ --no-interaction
 
 # This actually installs Mage-OS
-$COMPOSER_CMD require mage-os/product-community-edition --no-update --no-interaction
+if ! package_exists "mage-os/product-community-edition"; then
+    echo "Adding mage-os/product-community-edition to composer.json"
+    $COMPOSER_CMD require mage-os/product-community-edition --no-update --no-interaction
+else
+    echo "mage-os/product-community-edition already exists in composer.json, skipping"
+fi
 
 # Remove version constraints to prevent update issues
-$COMPOSER_CMD require allure-framework/allure-phpunit:* magento/magento2-functional-testing-framework:* phpstan/phpstan:* phpunit/phpunit:* sebastian/phpcpd:* --dev --no-update --no-interaction
+# Check if any of the dev packages are missing
+DEV_PACKAGES=(
+    "allure-framework/allure-phpunit"
+    "magento/magento2-functional-testing-framework"
+    "phpstan/phpstan"
+    "phpunit/phpunit"
+    "sebastian/phpcpd"
+)
+MISSING_DEV_PACKAGES=false
+for pkg in "${DEV_PACKAGES[@]}"; do
+    if ! package_exists "$pkg" "--dev"; then
+        MISSING_DEV_PACKAGES=true
+        break
+    fi
+done
+
+if [ "$MISSING_DEV_PACKAGES" = true ]; then
+    echo "Configuring dev dependencies version constraints"
+    $COMPOSER_CMD require allure-framework/allure-phpunit:* magento/magento2-functional-testing-framework:* phpstan/phpstan:* phpunit/phpunit:* sebastian/phpcpd:* --dev --no-update --no-interaction
+else
+    echo "Dev dependencies already configured, skipping"
+fi
 
 # We don't need these packages anymore
-$COMPOSER_CMD remove magento/product-community-edition magento/composer-dependency-version-audit-plugin magento/composer-root-update-plugin --no-update --no-interaction
+PACKAGES_TO_REMOVE=(
+    "magento/product-community-edition"
+    "magento/composer-dependency-version-audit-plugin"
+    "magento/composer-root-update-plugin"
+)
+PACKAGES_NEED_REMOVAL=false
+for pkg in "${PACKAGES_TO_REMOVE[@]}"; do
+    if package_exists "$pkg"; then
+        PACKAGES_NEED_REMOVAL=true
+        break
+    fi
+done
+
+if [ "$PACKAGES_NEED_REMOVAL" = true ]; then
+    echo "Removing Magento packages"
+    $COMPOSER_CMD remove magento/product-community-edition magento/composer-dependency-version-audit-plugin magento/composer-root-update-plugin --no-update --no-interaction
+else
+    echo "Magento packages already removed, skipping"
+fi
 
 # Actually run the update.
-$COMPOSER_CMD update --no-plugins --with-all-dependencies --no-interaction
+UPDATE_SUCCESS=false
+while [ "$UPDATE_SUCCESS" = false ]; do
+    echo "Running composer update..."
+    if $COMPOSER_CMD update --no-plugins --with-all-dependencies --no-interaction; then
+        UPDATE_SUCCESS=true
+        echo -e "${GREEN}Composer update completed successfully${NC}"
+    else
+        echo ""
+        echo -e "${RED}=========================================${NC}"
+        echo -e "${RED}Composer update failed${NC}"
+        echo -e "${RED}=========================================${NC}"
+        echo ""
+        echo -e "${YELLOW}It seems that the \`composer update\` command failed.${NC}"
+        echo -e "${YELLOW}Please take a look at the errors reported, see if you can fix them and try again.${NC}"
+        echo ""
+        echo -e "${YELLOW}If you need help with this step you can always ask for help at the Mage-OS Discord channel:${NC}"
+        echo -e "${YELLOW}https://mage-os.org/discord-channel/${NC}"
+        echo ""
+
+        if [[ -z "${CI:-}" ]]; then
+            read -p "Would you like to retry the composer update? (yes/no): " -r
+            echo ""
+            if [[ ! $REPLY =~ ^[Yy][Ee][Ss]$ ]]; then
+                echo -e "${RED}Migration cancelled.${NC}"
+                exit 1
+            fi
+        else
+            # In CI mode, don't retry automatically
+            echo -e "${RED}Running in CI mode, exiting...${NC}"
+            exit 1
+        fi
+    fi
+done
 
 echo ""
 echo "Verifying Mage-OS installation..."
