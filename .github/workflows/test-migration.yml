@@ -40,7 +40,7 @@ jobs:
 
       - name: Run migration
         run: |
-          docker exec -e CI=true magento-project-community-edition bash -c "cat /data/extensions/migrate-m2-to-mageos/migrate-to-mage-os.sh | bash"
+          docker exec -e CI=true -e COMPOSER_NO_SECURITY_BLOCKING=1 magento-project-community-edition bash -c "cat /data/extensions/migrate-m2-to-mageos/migrate-to-mage-os.sh | bash"
 
       - name: Validate that we can reach the frontend
         run: curl --fail-with-body http://localhost/
