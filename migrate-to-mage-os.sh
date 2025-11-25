@@ -358,7 +358,7 @@ fi
 UPDATE_SUCCESS=false
 while [ "$UPDATE_SUCCESS" = false ]; do
     echo "Running composer update..."
-    if $COMPOSER_CMD update --no-plugins --with-all-dependencies --no-interaction; then
+    if $COMPOSER_CMD update --no-plugins --with-all-dependencies --no-security-blocking --no-interaction; then
         UPDATE_SUCCESS=true
         echo -e "${GREEN}Composer update completed successfully${NC}"
     else
