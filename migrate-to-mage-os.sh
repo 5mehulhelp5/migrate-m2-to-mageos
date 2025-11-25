@@ -10,6 +10,10 @@ YELLOW='\033[1;33m'
 GREEN='\033[0;32m'
 NC='\033[0m' # No Color
 
+# Version requirements
+REQUIRED_PHP_VERSION="8.3.0"
+REQUIRED_MAGENTO_VERSION="2.4.8"
+
 # WARNING: Do not execute this script on a production environment
 if [[ -z "${CI:-}" ]]; then
     echo -e "${YELLOW}==========================================${NC}"
@@ -53,6 +57,20 @@ fi
 
 echo "Using PHP: $PHP_CMD"
 
+# Check PHP version
+PHP_VERSION=$($PHP_CMD -r "echo PHP_VERSION;")
+echo "PHP Version: $PHP_VERSION"
+
+# Compare version with required version
+if $PHP_CMD -r "exit(version_compare(PHP_VERSION, '${REQUIRED_PHP_VERSION}', '>=') ? 0 : 1);"; then
+    echo -e "${GREEN}PHP version $PHP_VERSION meets minimum requirement (${REQUIRED_PHP_VERSION}+)${NC}"
+else
+    echo -e "${RED}Error: PHP ${REQUIRED_PHP_VERSION} or higher is required${NC}"
+    echo -e "${RED}Current version: $PHP_VERSION${NC}"
+    echo -e "${YELLOW}Please upgrade your PHP version to ${REQUIRED_PHP_VERSION} or higher before running this migration.${NC}"
+    exit 1
+fi
+
 # Check if composer is available
 if command -v composer &> /dev/null; then
     COMPOSER_CMD="composer"
@@ -76,13 +94,30 @@ echo -e "${GREEN}Ready to migrate from Magento to Mage-OS${NC}"
 
 # Get the Magento version
 echo "Checking your Magento version"
+set +e  # Temporarily disable error exit
 VERSION_OUTPUT=$($PHP_CMD bin/magento --version 2>&1)
-MAGENTO_VERSION=$(printf "%s" "$VERSION_OUTPUT" | awk '{
+VERSION_EXIT_CODE=$?
+set -e  # Re-enable error exit
+
+# Check if the command failed
+if [[ $VERSION_EXIT_CODE -ne 0 ]]; then
+    echo -e "${RED}Error: Failed to get Magento version (exit code: $VERSION_EXIT_CODE)${NC}"
+    echo -e "${RED}Output:${NC}"
+    echo "$VERSION_OUTPUT"
+    echo ""
+    echo -e "${YELLOW}Common causes:${NC}"
+    echo -e "${YELLOW}  - File permissions are set incorrectly${NC}"
+    echo -e "${YELLOW}  - Composer dependencies are not installed${NC}"
+    echo -e "${YELLOW}  - PHP configuration issues${NC}"
+    exit 1
+fi
+
+MAGENTO_VERSION=$(printf "%s" "$VERSION_OUTPUT" | awk -v req_ver="$REQUIRED_MAGENTO_VERSION" '{
     for (i=1; i<=NF; i++) {
         token = $i
         gsub(/^[^0-9]*/, "", token)
         gsub(/[^0-9A-Za-z.\-].*$/, "", token)
-        if (token ~ /^2\.4\.8/) {
+        if (token ~ "^" req_ver) {
             print token
             exit
         }
@@ -90,15 +125,15 @@ MAGENTO_VERSION=$(printf "%s" "$VERSION_OUTPUT" | awk '{
 }')
 
 if [[ -z "$MAGENTO_VERSION" ]]; then
-    echo -e "${RED}Error: This script only supports Magento 2.4.8${NC}"
+    echo -e "${RED}Error: This script only supports Magento ${REQUIRED_MAGENTO_VERSION}${NC}"
     echo -e "${RED}Version output:${NC} $VERSION_OUTPUT"
     echo -e "${YELLOW}It is important to upgrade your store to the latest Magento version before upgrading to Mage-OS.${NC}"
     exit 1
 fi
 
-# Check if version is 2.4.8
-if [[ "$MAGENTO_VERSION" != 2.4.8* ]]; then
-    echo -e "${RED}Error: This script only supports Magento 2.4.8${NC}"
+# Check if version matches required version
+if [[ "$MAGENTO_VERSION" != ${REQUIRED_MAGENTO_VERSION}* ]]; then
+    echo -e "${RED}Error: This script only supports Magento ${REQUIRED_MAGENTO_VERSION}${NC}"
     echo -e "${RED}Your version: $MAGENTO_VERSION${NC}"
     echo -e "${YELLOW}It is important to upgrade your store to the latest Magento version before upgrading to Mage-OS.${NC}"
     exit 1
