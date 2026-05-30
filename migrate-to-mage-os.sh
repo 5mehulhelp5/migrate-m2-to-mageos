@@ -259,6 +259,13 @@ flush_redis_db() {
 # Add the Mage-OS repository, so Composer know where to download the packages from
 $COMPOSER_CMD config repositories.mage-os composer https://repo.mage-os.org/ --no-interaction
 
+# Allow the Mage-OS composer plugins to run. The Magento 2.4.8 root composer.json only allow-lists
+# magento/*, so the mage-os/* equivalents pulled in by the upgrade (composer-root-update-plugin,
+# composer-dependency-version-audit-plugin, magento-composer-installer, ...) would otherwise be blocked
+# by allow-plugins and abort require-commerce mid-install. Upstream sidesteps this with `update --no-plugins`,
+# but require-commerce IS a plugin command and runs with plugins enabled, so we must allow them explicitly.
+$COMPOSER_CMD config --no-interaction "allow-plugins.mage-os/*" true
+
 # Ensure composer.json name matches Mage-OS
 $PHP_CMD -r '
     $path = "composer.json";
@@ -336,16 +343,15 @@ $PHP_CMD -r '
     }
 '
 
-# This actually installs Mage-OS
-if ! package_exists "mage-os/product-community-edition"; then
-    echo "Adding mage-os/product-community-edition to composer.json"
-    $COMPOSER_CMD require mage-os/product-community-edition --no-update --no-interaction
-else
-    echo "mage-os/product-community-edition already exists in composer.json, skipping"
-fi
+# Install the Mage-OS root-update plugin FIRST, while the install is still Magento 2.4.8. The plugin only
+# needs php + composer, so this lands it without disturbing the rest of the dependency set, and — crucially —
+# activates the `require-commerce` command used in the upgrade step below.
+# NOTE: this requires the Mage-OS-aware release of the plugin (mage-os/composer-root-update-plugin built with
+# Mage-OS package support). See https://github.com/mage-os/mageos-composer-root-update-plugin.
+echo "Installing mage-os/composer-root-update-plugin"
+$COMPOSER_CMD require mage-os/composer-root-update-plugin --no-interaction
 
-# Remove version constraints to prevent update issues
-# Check if any of the dev packages are missing
+# Relax dev dependency constraints (kept from upstream script), staged for the single resolve below.
 DEV_PACKAGES=(
     "allure-framework/allure-phpunit"
     "magento/magento2-functional-testing-framework"
@@ -368,7 +374,9 @@ else
     echo "Dev dependencies already configured, skipping"
 fi
 
-# We don't need these packages anymore
+# Remove the Magento metapackage and its audit/root-update plugins from composer.json (staged, no install).
+# NOTE: unlike the upstream script we do NOT pre-require mage-os/product-community-edition here —
+# `require-commerce` below is what adds it, so the plugin can compute the root delta first.
 PACKAGES_TO_REMOVE=(
     "magento/product-community-edition"
     "magento/composer-dependency-version-audit-plugin"
@@ -383,17 +391,44 @@ for pkg in "${PACKAGES_TO_REMOVE[@]}"; do
 done
 
 if [ "$PACKAGES_NEED_REMOVAL" = true ]; then
-    echo "Removing Magento packages"
+    echo "Removing Magento packages (staged, --no-update)"
     $COMPOSER_CMD remove magento/product-community-edition magento/composer-dependency-version-audit-plugin magento/composer-root-update-plugin --no-update --no-interaction
 else
     echo "Magento packages already removed, skipping"
 fi
 
-# Actually run the update.
+TARGET_VERSION="3.0.0"
+# Base = the last Mage-OS release before the target. Its project skeleton lacks the "MageOS\Installer\"
+# psr-4 entry (added in the 3.x line), so the 2.3.0 -> 3.0.0 delta is exactly what needs merging.
+# We supply it explicitly because the lock still references magento/* — which the plugin cannot use as
+# an origin once it only recognizes mage-os/* — so auto-detection from composer.lock would return null.
+BASE_VERSION="2.3.0"
+
+# STEP 1 — root composer.json fix ONLY (no install): the patched plugin diffs the BASE skeleton
+# (mage-os/project-community-edition:${BASE_VERSION}) against the TARGET (${TARGET_VERSION}) and merges the
+# delta into composer.json — notably the conflict-free add of the "MageOS\\Installer\\" psr-4 entry.
+# --no-update is deliberate: require-commerce runs the root merge BEFORE the native require, so with
+# --no-update it edits composer.json (adds the metapackage + autoload entry) without resolving/installing.
+# This keeps plugins from activating here, avoiding the magento/framework vs mage-os/framework
+# registration.php collision that happens when both vendors are momentarily present during a swap.
+echo "Running composer require-commerce mage-os/product-community-edition:${TARGET_VERSION} (base ${BASE_VERSION}, --no-update) ..."
+# No --force-root-updates: the entry we need is a conflict-free add, and omitting force preserves any
+# genuine user customizations on other fields (conflicts are logged and left unchanged).
+if ! $COMPOSER_CMD require-commerce "mage-os/product-community-edition:${TARGET_VERSION}" \
+    --base-project-edition "Open Source" --base-project-version "${BASE_VERSION}" \
+    --no-update --no-interaction; then
+    echo -e "${RED}require-commerce (root composer.json update) failed.${NC}"
+    echo -e "${YELLOW}Review the errors above; the root composer.json was reverted. Migration cancelled.${NC}"
+    exit 1
+fi
+echo -e "${GREEN}require-commerce updated composer.json (autoload + metapackage), no install performed${NC}"
+
+# STEP 2 — the actual dependency swap. Plugins OFF (mirrors upstream) so registration.php is not executed
+# mid-swap while both magento/* and mage-os/* packages are transiently on disk.
 UPDATE_SUCCESS=false
 while [ "$UPDATE_SUCCESS" = false ]; do
-    echo "Running composer update..."
-    if $COMPOSER_CMD update --no-plugins --with-all-dependencies --no-security-blocking --no-interaction; then
+    echo "Running composer update --no-plugins --with-all-dependencies ..."
+    if $COMPOSER_CMD update --no-plugins --with-all-dependencies --no-interaction; then
         UPDATE_SUCCESS=true
         echo -e "${GREEN}Composer update completed successfully${NC}"
     else
@@ -402,13 +437,8 @@ while [ "$UPDATE_SUCCESS" = false ]; do
         echo -e "${RED}Composer update failed${NC}"
         echo -e "${RED}=========================================${NC}"
         echo ""
-        echo -e "${YELLOW}It seems that the \`composer update\` command failed.${NC}"
-        echo -e "${YELLOW}Please take a look at the errors reported, see if you can fix them and try again.${NC}"
+        echo -e "${YELLOW}Take a look at the errors reported, see if you can fix them and try again.${NC}"
         echo ""
-        echo -e "${YELLOW}If you need help with this step you can always ask for help at the Mage-OS Discord channel:${NC}"
-        echo -e "${YELLOW}https://mage-os.org/discord-channel/${NC}"
-        echo ""
-
         read -p "Would you like to retry the composer update? (Yes/no): " -r
         echo ""
         if [[ -z "$REPLY" || "$REPLY" =~ ^[Yy]([Ee][Ss])?$ ]]; then
@@ -419,6 +449,14 @@ while [ "$UPDATE_SUCCESS" = false ]; do
         fi
     fi
 done
+
+# The dependency swap above ran with --no-plugins, so the Mage-OS composer installer did not (re)deploy the
+# base files (setup/, app/etc, bin/, pub/) into the project root — they would otherwise stay at their Magento
+# 2.4.8 versions and break setup:upgrade (e.g. setup/src/Magento/Setup/Application.php referencing classes that
+# Mage-OS 3.0 removed). Reinstall the base package now that only mage-os/* is present (no dual-framework, so the
+# plugins are safe to run without a registration.php collision).
+echo "Deploying Mage-OS base files (setup/, app/etc, bin/, pub/) ..."
+$COMPOSER_CMD reinstall mage-os/magento2-base --no-interaction
 
 echo ""
 echo "Verifying Mage-OS installation..."
