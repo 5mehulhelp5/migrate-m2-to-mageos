@@ -1,6 +1,7 @@
 name: test-migration.yaml
 on:
-  - push
+  push:
+  workflow_dispatch:
 
 jobs:
   test-migration:
