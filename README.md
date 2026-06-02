@@ -6,7 +6,7 @@ This repository contains a migration script to help you migrate from Magento 2 C
 
 Before running this migration script, ensure your environment meets the following requirements:
 
-- **Magento Version**: 2.4.8 (including all patch versions like 2.4.8-p1, 2.4.8-p2, etc.)
+- **Magento Version**: 2.4.9 (including all patch versions like 2.4.9-p1, 2.4.9-p2, etc.)
 - **Magento Mode**: Developer mode (the script will verify this)
 - **Environment**: Local or staging environment (**DO NOT run on production**)
 
@@ -43,7 +43,7 @@ Make sure to check your installation thoroughly before deploying to production.
 
 - **This script is intended for local and staging environments only**
 - **Always backup your database and files before running the migration**
-- **Ensure you're running Magento 2.4.8 before starting the migration**
+- **Ensure you're running Magento 2.4.9 before starting the migration**
 - **DO NOT run on production**
 - The script will prompt you to accept Mage-OS Composer plugins during execution
 

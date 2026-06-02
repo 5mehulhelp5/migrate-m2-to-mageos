@@ -11,8 +11,8 @@ GREEN='\033[0;32m'
 NC='\033[0m' # No Color
 
 # Version requirements
-REQUIRED_PHP_VERSION="8.3.0"
-REQUIRED_MAGENTO_VERSION="2.4.8"
+REQUIRED_PHP_VERSION="8.4.0"
+REQUIRED_MAGENTO_VERSION="2.4.9"
 
 # WARNING: Do not execute this script on a production environment
 if [[ -z "${CI:-}" ]]; then
@@ -339,7 +339,7 @@ $PHP_CMD -r '
 # This actually installs Mage-OS
 if ! package_exists "mage-os/product-community-edition"; then
     echo "Adding mage-os/product-community-edition to composer.json"
-    $COMPOSER_CMD require mage-os/product-community-edition --no-update --no-interaction
+    $COMPOSER_CMD require mage-os/product-community-edition:^3.0 --no-update --no-interaction
 else
     echo "mage-os/product-community-edition already exists in composer.json, skipping"
 fi
