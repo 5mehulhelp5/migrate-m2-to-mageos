@@ -14,6 +14,21 @@ NC='\033[0m' # No Color
 REQUIRED_PHP_VERSION="8.4.0"
 REQUIRED_MAGENTO_VERSION="2.4.9"
 
+# Parse script arguments
+NO_SECURITY_BLOCKING=false
+for arg in "$@"; do
+    case "$arg" in
+        --no-security-blocking)
+            NO_SECURITY_BLOCKING=true
+            ;;
+        *)
+            echo -e "${RED}Unknown option: ${arg}${NC}"
+            echo -e "${YELLOW}Usage: $0 [--no-security-blocking]${NC}"
+            exit 1
+            ;;
+    esac
+done
+
 # WARNING: Do not execute this script on a production environment
 if [[ -z "${CI:-}" ]]; then
     echo -e "${YELLOW}==========================================${NC}"
@@ -425,10 +440,19 @@ echo -e "${GREEN}require-commerce updated composer.json (autoload + metapackage)
 
 # STEP 2 — the actual dependency swap. Plugins OFF (mirrors upstream) so registration.php is not executed
 # mid-swap while both magento/* and mage-os/* packages are transiently on disk.
+SECURITY_BLOCKING_FLAG=""
+if [ "$NO_SECURITY_BLOCKING" = true ]; then
+    echo -e "${YELLOW}Running with --no-security-blocking: composer security advisories will not block the update.${NC}"
+    SECURITY_BLOCKING_FLAG="--no-security-blocking"
+fi
+
+UPDATE_LOG=$(mktemp)
+trap 'rm -f "$UPDATE_LOG"' EXIT
+
 UPDATE_SUCCESS=false
 while [ "$UPDATE_SUCCESS" = false ]; do
     echo "Running composer update --no-plugins --with-all-dependencies ..."
-    if $COMPOSER_CMD update --no-plugins --with-all-dependencies --no-interaction; then
+    if $COMPOSER_CMD update --no-plugins --with-all-dependencies $SECURITY_BLOCKING_FLAG --no-interaction 2>&1 | tee "$UPDATE_LOG"; then
         UPDATE_SUCCESS=true
         echo -e "${GREEN}Composer update completed successfully${NC}"
     else
@@ -439,6 +463,16 @@ while [ "$UPDATE_SUCCESS" = false ]; do
         echo ""
         echo -e "${YELLOW}Take a look at the errors reported, see if you can fix them and try again.${NC}"
         echo ""
+
+        # Detect a failure caused by a blocking security advisory and point to the opt-out flag
+        if [ "$NO_SECURITY_BLOCKING" = false ] && grep -qiE "security|advisor|vulnerab" "$UPDATE_LOG"; then
+            echo -e "${YELLOW}This looks like it was blocked by a composer security advisory.${NC}"
+            echo -e "${YELLOW}If that advisory is expected, you can re-run the migration with the${NC}"
+            echo -e "${YELLOW}--no-security-blocking option to let the update proceed past it:${NC}"
+            echo -e "${YELLOW}    $0 --no-security-blocking${NC}"
+            echo ""
+        fi
+
         read -p "Would you like to retry the composer update? (Yes/no): " -r
         echo ""
         if [[ -z "$REPLY" || "$REPLY" =~ ^[Yy]([Ee][Ss])?$ ]]; then
@@ -457,6 +491,43 @@ done
 # plugins are safe to run without a registration.php collision).
 echo "Deploying Mage-OS base files (setup/, app/etc, bin/, pub/) ..."
 $COMPOSER_CMD reinstall mage-os/magento2-base --no-interaction
+
+# Guarantee the MageOS\Installer psr-4 autoload entry. require-commerce above merges the base->target skeleton
+# delta into composer.json, but when the chosen base version already carries this entry it is not part of the
+# delta, so it never lands. The deployed 3.0 setup/ files reference MageOS\Installer\Console\Command\InstallCommand,
+# so without the entry setup:upgrade fatals: Class "MageOS\Installer\Console\Command\InstallCommand" not found.
+# This block is idempotent: it does nothing when require-commerce (or a future release) already added the entry.
+echo "Ensuring MageOS\\Installer\\ autoload entry in composer.json ..."
+$PHP_CMD -r '
+    $path = "composer.json";
+    if (!file_exists($path)) {
+        fwrite(STDERR, "composer.json not found\n");
+        exit(1);
+    }
+
+    $composer = json_decode(file_get_contents($path), true);
+    if (!is_array($composer)) {
+        fwrite(STDERR, "Unable to parse composer.json\n");
+        exit(1);
+    }
+
+    $prefix = "MageOS\\Installer\\";
+    $target = "setup/src/MageOS/Installer/";
+    if (($composer["autoload"]["psr-4"][$prefix] ?? null) === $target) {
+        echo "composer.json already has the MageOS\\Installer\\ autoload entry\n";
+        exit(0);
+    }
+
+    $composer["autoload"]["psr-4"][$prefix] = $target;
+    file_put_contents(
+        $path,
+        json_encode($composer, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL
+    );
+    echo "Added MageOS\\Installer\\ psr-4 autoload entry to composer.json\n";
+'
+
+# Regenerate the autoloader so the psr-4 mapping is picked up before setup:upgrade runs.
+$COMPOSER_CMD dump-autoload --no-interaction
 
 echo ""
 echo "Verifying Mage-OS installation..."
