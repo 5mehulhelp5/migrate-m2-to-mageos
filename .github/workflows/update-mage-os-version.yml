@@ -60,7 +60,7 @@ jobs:
 
           echo "needs_update=true" >> "$GITHUB_OUTPUT"
 
-      - name: Check for an existing branch or pull request
+      - name: Check whether the update pull request already exists
         id: existing
         if: steps.versions.outputs.needs_update == 'true'
         env:
@@ -68,20 +68,17 @@ jobs:
           BRANCH: automated/mage-os-${{ steps.versions.outputs.latest }}
         run: |
           set -euo pipefail
-          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
-            echo "Branch $BRANCH already exists, nothing to do"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
+          number=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // ""')
+          if [[ -n "$number" ]]; then
+            echo "Pull request #${number} is already open for ${BRANCH}"
+            echo "https://github.com/${GITHUB_REPOSITORY}/pull/${number}" >> "$GITHUB_STEP_SUMMARY"
           fi
+          echo "pr_number=$number" >> "$GITHUB_OUTPUT"
 
-      - name: Open the update pull request
-        if: steps.versions.outputs.needs_update == 'true' && steps.existing.outputs.skip == 'false'
-        # Pushing with GITHUB_TOKEN does not trigger test-migration.yaml on the new branch.
-        # Store a PAT with `repo` + `workflow` scope as MAGE_OS_UPDATE_TOKEN to have the
-        # migration test run on the pull request automatically.
+      - name: Push the version bump and open the pull request
+        if: steps.versions.outputs.needs_update == 'true' && steps.existing.outputs.pr_number == ''
         env:
-          GH_TOKEN: ${{ secrets.MAGE_OS_UPDATE_TOKEN || github.token }}
+          GH_TOKEN: ${{ github.token }}
           BRANCH: automated/mage-os-${{ steps.versions.outputs.latest }}
           CURRENT: ${{ steps.versions.outputs.current }}
           LATEST: ${{ steps.versions.outputs.latest }}
@@ -97,13 +94,48 @@ jobs:
 
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git checkout -b "$BRANCH"
           git commit -am "Update Mage-OS target version to ${LATEST}"
-          git push origin "$BRANCH"
+          # Force is safe here: this step only runs when no pull request is open for the branch,
+          # so anything already on it is a leftover from an earlier failed run of this job.
+          git push --force origin "$BRANCH"
 
-          gh pr create \
+          if gh pr create \
             --base "${GITHUB_REF_NAME}" \
             --head "$BRANCH" \
             --title "Update Mage-OS target version to ${LATEST}" \
-            --body "Mage-OS ${LATEST} is available on https://repo.mage-os.org/, the migration script still installs ${CURRENT}. This bumps \`TARGET_VERSION\` in \`migrate-to-mage-os.sh\`; \`BASE_VERSION\` stays at 2.3.0 because it is the skeleton the root-update plugin diffs against, not the version being installed. Merge once the migration test is green on this branch. Opened automatically by the daily version check."
+            --body "Mage-OS ${LATEST} is available on https://repo.mage-os.org/, the migration script still installs ${CURRENT}. This bumps \`TARGET_VERSION\` in \`migrate-to-mage-os.sh\`; \`BASE_VERSION\` stays at 2.3.0 because it is the skeleton the root-update plugin diffs against, not the version being installed. Merge once the migration test is green on this branch. Opened automatically by the daily version check."; then
+            exit 0
+          fi
+
+          # Opening the pull request needs a permission this repository does not grant to Actions.
+          # The branch IS pushed, so a human can finish it in one click via the compare link below.
+          # This job deliberately keeps failing every day until the update lands, so the pending
+          # upgrade stays visible instead of disappearing into a green run.
+          compare="https://github.com/${GITHUB_REPOSITORY}/compare/${GITHUB_REF_NAME}...${BRANCH}?expand=1"
+
+          {
+            echo "## Mage-OS ${LATEST} is available, but the pull request could not be opened"
+            echo
+            echo "The branch \`${BRANCH}\` is pushed and contains the \`${CURRENT}\` -> \`${LATEST}\` bump."
+            echo "Creating the pull request failed, almost certainly because of:"
+            echo
+            echo "> GitHub Actions is not permitted to create or approve pull requests"
+            echo
+            echo "### Open the pull request by hand (one click)"
+            echo
+            echo "${compare}"
+            echo
+            echo "### Or make this job do it, pick one"
+            echo
+            echo "1. A repository admin enables **Settings -> Actions -> General -> Workflow permissions -> Allow GitHub Actions to create and approve pull requests**."
+            echo "   If that checkbox is greyed out, the organisation owner has to enable the same setting at **Organisation settings -> Actions -> General** first."
+            echo "2. Or add a personal access token with the \`repo\` and \`workflow\` scopes as the repository secret \`MAGE_OS_UPDATE_TOKEN\`,"
+            echo "   and change the \`GH_TOKEN\` of this step to \`\${{ secrets.MAGE_OS_UPDATE_TOKEN || github.token }}\`."
+            echo "   This option also makes \`test-migration.yaml\` run on the pull request, which the default token cannot trigger."
+            echo
+            echo "Until one of these happens this job fails once a day on purpose."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "::error title=Cannot open the Mage-OS ${LATEST} pull request::The branch ${BRANCH} is pushed but Actions may not create pull requests in this repository.%0AOpen it by hand: ${compare}%0AOr let an admin enable 'Allow GitHub Actions to create and approve pull requests' (Settings -> Actions -> General), or add a PAT as the MAGE_OS_UPDATE_TOKEN secret.%0ASee the job summary for the full instructions."
+          exit 1
