@@ -1,0 +1,109 @@
+name: update-mage-os-version.yaml
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 4 * * *'   # daily 04:00 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  update-mage-os-version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve current and latest Mage-OS version
+        id: versions
+        run: |
+          set -euo pipefail
+
+          current=$(sed -n 's/^TARGET_VERSION="\(.*\)"$/\1/p' migrate-to-mage-os.sh)
+          if [[ -z "$current" ]]; then
+            echo "::error::Could not read TARGET_VERSION from migrate-to-mage-os.sh"
+            exit 1
+          fi
+
+          # Stable releases only: anything with a suffix (-beta, -rc, -p1, ...) is skipped.
+          latest=$(curl -fsSL https://repo.mage-os.org/p2/mage-os/product-community-edition.json \
+            | jq -r '.packages["mage-os/product-community-edition"][].version' \
+            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V \
+            | tail -n 1)
+          if [[ -z "$latest" ]]; then
+            echo "::error::Could not determine the latest Mage-OS version from repo.mage-os.org"
+            exit 1
+          fi
+
+          echo "Current: $current"
+          echo "Latest:  $latest"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+
+          if [[ "$current" == "$latest" ]]; then
+            echo "Already on the latest version"
+            echo "needs_update=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Never downgrade: only act when the repository actually offers something newer.
+          newest=$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -n 1)
+          if [[ "$newest" != "$latest" ]]; then
+            echo "::warning::Pinned version $current is newer than the latest published $latest, nothing to do"
+            echo "needs_update=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "needs_update=true" >> "$GITHUB_OUTPUT"
+
+      - name: Check for an existing branch or pull request
+        id: existing
+        if: steps.versions.outputs.needs_update == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: automated/mage-os-${{ steps.versions.outputs.latest }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "Branch $BRANCH already exists, nothing to do"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open the update pull request
+        if: steps.versions.outputs.needs_update == 'true' && steps.existing.outputs.skip == 'false'
+        # Pushing with GITHUB_TOKEN does not trigger test-migration.yaml on the new branch.
+        # Store a PAT with `repo` + `workflow` scope as MAGE_OS_UPDATE_TOKEN to have the
+        # migration test run on the pull request automatically.
+        env:
+          GH_TOKEN: ${{ secrets.MAGE_OS_UPDATE_TOKEN || github.token }}
+          BRANCH: automated/mage-os-${{ steps.versions.outputs.latest }}
+          CURRENT: ${{ steps.versions.outputs.current }}
+          LATEST: ${{ steps.versions.outputs.latest }}
+        run: |
+          set -euo pipefail
+
+          sed -i "s/^TARGET_VERSION=\".*\"$/TARGET_VERSION=\"${LATEST}\"/" migrate-to-mage-os.sh
+
+          if git diff --quiet -- migrate-to-mage-os.sh; then
+            echo "::error::TARGET_VERSION replacement produced no change"
+            exit 1
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git checkout -b "$BRANCH"
+          git commit -am "Update Mage-OS target version to ${LATEST}"
+          git push origin "$BRANCH"
+
+          gh pr create \
+            --base "${GITHUB_REF_NAME}" \
+            --head "$BRANCH" \
+            --title "Update Mage-OS target version to ${LATEST}" \
+            --body "Mage-OS ${LATEST} is available on https://repo.mage-os.org/, the migration script still installs ${CURRENT}. This bumps \`TARGET_VERSION\` in \`migrate-to-mage-os.sh\`; \`BASE_VERSION\` stays at 2.3.0 because it is the skeleton the root-update plugin diffs against, not the version being installed. Merge once the migration test is green on this branch. Opened automatically by the daily version check."
