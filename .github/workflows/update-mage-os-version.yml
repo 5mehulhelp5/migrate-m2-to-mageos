@@ -108,34 +108,21 @@ jobs:
             exit 0
           fi
 
-          # Opening the pull request needs a permission this repository does not grant to Actions.
-          # The branch IS pushed, so a human can finish it in one click via the compare link below.
-          # This job deliberately keeps failing every day until the update lands, so the pending
-          # upgrade stays visible instead of disappearing into a green run.
+          # The branch is pushed, so the update is one click away. This job stays red until the
+          # update lands, so a pending upgrade cannot disappear into a green run.
           compare="https://github.com/${GITHUB_REPOSITORY}/compare/${GITHUB_REF_NAME}...${BRANCH}?expand=1"
 
           {
-            echo "## Mage-OS ${LATEST} is available, but the pull request could not be opened"
+            echo "## Mage-OS ${LATEST} is available"
             echo
-            echo "The branch \`${BRANCH}\` is pushed and contains the \`${CURRENT}\` -> \`${LATEST}\` bump."
-            echo "Creating the pull request failed, almost certainly because of:"
+            echo "The branch \`${BRANCH}\` is ready and contains the \`${CURRENT}\` -> \`${LATEST}\` bump."
             echo
-            echo "> GitHub Actions is not permitted to create or approve pull requests"
-            echo
-            echo "### Open the pull request by hand (one click)"
+            echo "Open the pull request:"
             echo
             echo "${compare}"
             echo
-            echo "### Or make this job do it, pick one"
-            echo
-            echo "1. A repository admin enables **Settings -> Actions -> General -> Workflow permissions -> Allow GitHub Actions to create and approve pull requests**."
-            echo "   If that checkbox is greyed out, the organisation owner has to enable the same setting at **Organisation settings -> Actions -> General** first."
-            echo "2. Or add a personal access token with the \`repo\` and \`workflow\` scopes as the repository secret \`MAGE_OS_UPDATE_TOKEN\`,"
-            echo "   and change the \`GH_TOKEN\` of this step to \`\${{ secrets.MAGE_OS_UPDATE_TOKEN || github.token }}\`."
-            echo "   This option also makes \`test-migration.yaml\` run on the pull request, which the default token cannot trigger."
-            echo
-            echo "Until one of these happens this job fails once a day on purpose."
+            echo "This check stays red until the update is merged."
           } >> "$GITHUB_STEP_SUMMARY"
 
-          echo "::error title=Cannot open the Mage-OS ${LATEST} pull request::The branch ${BRANCH} is pushed but Actions may not create pull requests in this repository.%0AOpen it by hand: ${compare}%0AOr let an admin enable 'Allow GitHub Actions to create and approve pull requests' (Settings -> Actions -> General), or add a PAT as the MAGE_OS_UPDATE_TOKEN secret.%0ASee the job summary for the full instructions."
+          echo "::error title=Mage-OS ${LATEST} is available::The branch ${BRANCH} is ready with the ${CURRENT} -> ${LATEST} bump.%0AOpen the pull request: ${compare}%0AThis check stays red until the update is merged."
           exit 1
